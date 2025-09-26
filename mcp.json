@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "sha256-news": {
+      "command": "python3",
+      "args": ["src/bitcoin_news_server.py"],
+      "env": {
+        "PYTHONPATH": "."
+      }
+    }
+  }
+}

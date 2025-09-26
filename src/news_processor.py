@@ -1,0 +1,233 @@
+"""
+Bitcoin News Processing Module
+Handles EventRegistry API integration and Gemini AI article generation
+"""
+
+import os
+import asyncio
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
+import json
+
+from eventregistry import EventRegistry, QueryArticlesIter, QueryArticles
+import google.generativeai as genai
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class BitcoinNewsProcessor:
+    """Processes Bitcoin mining news from EventRegistry and generates articles with Gemini"""
+    
+    def __init__(self):
+        # Initialize EventRegistry
+        self.er = EventRegistry(apiKey=os.getenv('EVENT_REGISTRY_API_KEY'))
+        
+        # Initialize Gemini
+        genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+        self.gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # Bitcoin mining keywords
+        self.bitcoin_keywords = os.getenv('BITCOIN_KEYWORDS', 
+            'bitcoin mining,bitcoin miners,hash rate,mining difficulty,ASIC miners,mining pools').split(',')
+        
+        self.min_relevance_score = float(os.getenv('MIN_RELEVANCE_SCORE', '0.7'))
+    
+    async def fetch_mining_news(self, max_articles: int = 10, days_back: int = 1) -> List[Dict[str, Any]]:
+        """Fetch Bitcoin mining news from EventRegistry"""
+        
+        try:
+            # Calculate date range
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days_back)
+            
+            # Create query for Bitcoin mining news
+            query = QueryArticles(
+                keywords=' OR '.join(self.bitcoin_keywords),
+                lang="eng",
+                dateStart=start_date.strftime('%Y-%m-%d'),
+                dateEnd=end_date.strftime('%Y-%m-%d'),
+                keywordOp="or"
+            )
+            
+            # Set what to return
+            query.setRequestedResult(RequestArticlesInfo(
+                page=1,
+                count=max_articles,
+                includeArticleTitle=True,
+                includeArticleBody=True,
+                includeArticleUrl=True,
+                includeArticleImage=True,
+                includeArticleDate=True,
+                includeArticleSource=True,
+                includeArticleSentiment=True,
+                includeArticleRelevance=True
+            ))
+            
+            # Execute query
+            articles = self.er.execQuery(query)
+            
+            # Filter and process results
+            processed_articles = []
+            
+            if 'articles' in articles and 'results' in articles['articles']:
+                for article in articles['articles']['results']:
+                    # Filter by relevance score
+                    relevance = article.get('relevance', 0)
+                    if relevance < self.min_relevance_score:
+                        continue
+                    
+                    # Check if actually about Bitcoin mining
+                    title_lower = article.get('title', '').lower()
+                    body_lower = article.get('body', '').lower()
+                    
+                    bitcoin_mentioned = any(
+                        keyword.strip().lower() in title_lower or keyword.strip().lower() in body_lower
+                        for keyword in self.bitcoin_keywords
+                    )
+                    
+                    if not bitcoin_mentioned:
+                        continue
+                    
+                    processed_article = {
+                        'title': article.get('title', ''),
+                        'body': article.get('body', ''),
+                        'url': article.get('url', ''),
+                        'published_date': article.get('date', ''),
+                        'source': {
+                            'name': article.get('source', {}).get('title', ''),
+                            'url': article.get('source', {}).get('uri', '')
+                        },
+                        'relevance_score': relevance,
+                        'sentiment': article.get('sentiment', 0),
+                        'image_url': article.get('image', ''),
+                        'keywords_matched': [
+                            kw.strip() for kw in self.bitcoin_keywords 
+                            if kw.strip().lower() in title_lower or kw.strip().lower() in body_lower
+                        ]
+                    }
+                    
+                    processed_articles.append(processed_article)
+            
+            return processed_articles[:max_articles]
+            
+        except Exception as e:
+            print(f"Error fetching news from EventRegistry: {str(e)}")
+            return []
+    
+    async def generate_comprehensive_article(
+        self, 
+        source_articles: List[Dict[str, Any]], 
+        focus_angle: str = "mining industry impact"
+    ) -> Dict[str, Any]:
+        """Generate comprehensive article using Gemini AI"""
+        
+        if not source_articles:
+            raise ValueError("No source articles provided")
+        
+        try:
+            # Prepare source content for Gemini
+            source_content = "\n\n".join([
+                f"Article {i+1}:\nTitle: {article.get('title', '')}\nSource: {article.get('source', {}).get('name', '')}\nContent: {article.get('body', '')[:1000]}..."
+                for i, article in enumerate(source_articles[:5])  # Limit to 5 articles to avoid token limits
+            ])
+            
+            # Create comprehensive prompt
+            prompt = f"""
+You are a Bitcoin mining industry analyst. Analyze the following news articles and create a comprehensive, insightful article focused on: {focus_angle}
+
+Source Articles:
+{source_content}
+
+Please create a professional article with the following structure:
+1. An engaging title (focus on Bitcoin mining industry impact)
+2. Executive summary (2-3 sentences)
+3. Key developments (analyze the main trends)
+4. Industry impact analysis 
+5. Technical implications (hash rate, difficulty, etc. if relevant)
+6. Market implications 
+7. Future outlook
+8. Conclusion
+
+Requirements:
+- Focus ONLY on Bitcoin mining (no other cryptocurrencies)
+- Provide unique insights beyond just summarizing
+- Include specific data points when available
+- Maintain professional, analytical tone
+- Length: 800-1200 words
+- Include 3-5 key takeaways
+
+Format the response as a JSON object with:
+- title: Article title
+- summary: Executive summary
+- content: Full article in Markdown format
+- key_insights: Array of 3-5 key takeaways
+- tags: Relevant tags for the article
+- word_count: Approximate word count
+"""
+            
+            # Generate with Gemini
+            response = await self._generate_with_gemini(prompt)
+            
+            # Parse JSON response
+            try:
+                article_data = json.loads(response)
+            except json.JSONDecodeError:
+                # Fallback if Gemini doesn't return valid JSON
+                article_data = {
+                    "title": "Bitcoin Mining Industry Update",
+                    "summary": response[:200] + "...",
+                    "content": response,
+                    "key_insights": ["Analysis of current Bitcoin mining trends"],
+                    "tags": ["bitcoin", "mining", "cryptocurrency"],
+                    "word_count": len(response.split())
+                }
+            
+            # Add metadata
+            article_data.update({
+                "source_articles_count": len(source_articles),
+                "focus_angle": focus_angle,
+                "generated_at": datetime.utcnow().isoformat(),
+                "sources": [
+                    {
+                        "title": article.get("title", ""),
+                        "source": article.get("source", {}).get("name", ""),
+                        "url": article.get("url", "")
+                    }
+                    for article in source_articles[:5]
+                ]
+            })
+            
+            return article_data
+            
+        except Exception as e:
+            raise Exception(f"Failed to generate article with Gemini: {str(e)}")
+    
+    async def _generate_with_gemini(self, prompt: str) -> str:
+        """Generate content using Gemini AI"""
+        try:
+            response = self.gemini_model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            raise Exception(f"Gemini API error: {str(e)}")
+    
+    def get_trending_keywords(self, articles: List[Dict[str, Any]]) -> List[str]:
+        """Extract trending keywords from articles"""
+        keyword_count = {}
+        
+        for article in articles:
+            for keyword in article.get('keywords_matched', []):
+                keyword_count[keyword] = keyword_count.get(keyword, 0) + 1
+        
+        # Sort by frequency
+        trending = sorted(keyword_count.items(), key=lambda x: x[1], reverse=True)
+        return [keyword for keyword, count in trending[:10]]
+
+
+# Import fix for EventRegistry
+try:
+    from eventregistry import RequestArticlesInfo
+except ImportError:
+    # Fallback if the import structure is different
+    class RequestArticlesInfo:
+        def __init__(self, **kwargs):
+            self.params = kwargs

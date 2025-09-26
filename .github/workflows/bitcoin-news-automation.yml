@@ -1,0 +1,49 @@
+name: Bitcoin News Automation
+
+on:
+  schedule:
+    # Run daily at 9 AM UTC
+    - cron: '0 9 * * *'
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  generate-news:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+    
+    - name: Run Bitcoin News Pipeline
+      env:
+        EVENT_REGISTRY_API_KEY: ${{ secrets.EVENT_REGISTRY_API_KEY }}
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TWITTER_API_KEY: ${{ secrets.TWITTER_API_KEY }}
+        TWITTER_API_SECRET: ${{ secrets.TWITTER_API_SECRET }}
+        TWITTER_ACCESS_TOKEN: ${{ secrets.TWITTER_ACCESS_TOKEN }}
+        TWITTER_ACCESS_TOKEN_SECRET: ${{ secrets.TWITTER_ACCESS_TOKEN_SECRET }}
+        TWITTER_BEARER_TOKEN: ${{ secrets.TWITTER_BEARER_TOKEN }}
+        GITHUB_REPO_OWNER: ${{ github.repository_owner }}
+        GITHUB_REPO_NAME: ${{ github.event.repository.name }}
+      run: |
+        python3 -c "
+        import asyncio
+        from src.bitcoin_news_server import SHA256NewsServer
+        
+        async def run_pipeline():
+            server = SHA256NewsServer()
+            result = await server._run_full_pipeline({'auto_publish': True})
+            print(result.content[0].text)
+        
+        asyncio.run(run_pipeline())
+        "
